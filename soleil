@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+#
+# soleil - Convert spectra from multiple instruments to HDF5
+#
+# Usage:
+#   soleil -p 32 --kpf --neid --harpsn --expres -O spectra.h5
+#   soleil -p 16 --kpf --kpf-dir /path/to/kpf -O kpf_only.h5
+#
+
+set -e
+
+# Default values
+NPROCS=1
+OUTPUT=""
+OVERWRITE=""
+LIMIT=""
+
+# Instrument flags
+USE_KPF=0
+USE_NEID=0
+USE_HARPSN=0
+USE_EXPRES=0
+
+# Input directories (can be overridden)
+KPF_DIR=""
+NEID_DIR=""
+HARPSN_DIR=""
+EXPRES_DIR=""
+
+usage() {
+    cat << EOF
+Usage: soleil [OPTIONS] -O OUTPUT
+
+Convert spectra from multiple instruments to a single HDF5 file.
+Each instrument's data is stored in its own HDF5 group.
+
+Options:
+  -p, --nprocs N        Number of MPI processes (default: 1)
+  -O, --output FILE     Output HDF5 file (required)
+  -f, --overwrite       Overwrite existing output file
+  -l, --limit N         Limit number of files per instrument (for testing)
+
+Instrument flags (at least one required):
+  --kpf                 Include KPF L1 data
+  --neid                Include NEID L2 data
+  --harpsn              Include HARPS-N S1D data
+  --expres              Include EXPRES L1 data
+
+Input directory overrides:
+  --kpf-dir DIR         KPF input directory
+  --neid-dir DIR        NEID input directory
+  --harpsn-dir DIR      HARPS-N input directory
+  --expres-dir DIR      EXPRES input directory
+
+Environment variables for default directories:
+  SOLEIL_KPF_DIR        Default KPF directory
+  SOLEIL_NEID_DIR       Default NEID directory
+  SOLEIL_HARPSN_DIR     Default HARPS-N directory
+  SOLEIL_EXPRES_DIR     Default EXPRES directory
+
+Examples:
+  # Process all instruments with 32 MPI ranks
+  soleil -p 32 --kpf --neid --harpsn --expres -O spectra.h5
+
+  # Process only KPF with custom directory
+  soleil -p 16 --kpf --kpf-dir /data/kpf -O kpf.h5
+
+  # Test with limited files
+  soleil -p 4 --kpf --neid -l 100 -O test.h5 -f
+EOF
+    exit 1
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p|--nprocs)
+            NPROCS="$2"
+            shift 2
+            ;;
+        -O|--output)
+            OUTPUT="$2"
+            shift 2
+            ;;
+        -f|--overwrite)
+            OVERWRITE="--overwrite"
+            shift
+            ;;
+        -l|--limit)
+            LIMIT="--limit $2"
+            shift 2
+            ;;
+        --kpf)
+            USE_KPF=1
+            shift
+            ;;
+        --neid)
+            USE_NEID=1
+            shift
+            ;;
+        --harpsn)
+            USE_HARPSN=1
+            shift
+            ;;
+        --expres)
+            USE_EXPRES=1
+            shift
+            ;;
+        --kpf-dir)
+            KPF_DIR="$2"
+            shift 2
+            ;;
+        --neid-dir)
+            NEID_DIR="$2"
+            shift 2
+            ;;
+        --harpsn-dir)
+            HARPSN_DIR="$2"
+            shift 2
+            ;;
+        --expres-dir)
+            EXPRES_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# Validate arguments
+if [[ -z "$OUTPUT" ]]; then
+    echo "Error: Output file (-O) is required"
+    usage
+fi
+
+if [[ $USE_KPF -eq 0 && $USE_NEID -eq 0 && $USE_HARPSN -eq 0 && $USE_EXPRES -eq 0 ]]; then
+    echo "Error: At least one instrument flag is required (--kpf, --neid, --harpsn, --expres)"
+    usage
+fi
+
+# Build instruments argument
+INSTRUMENTS=""
+[[ $USE_KPF -eq 1 ]] && INSTRUMENTS="$INSTRUMENTS kpf"
+[[ $USE_NEID -eq 1 ]] && INSTRUMENTS="$INSTRUMENTS neid"
+[[ $USE_HARPSN -eq 1 ]] && INSTRUMENTS="$INSTRUMENTS harpsn"
+[[ $USE_EXPRES -eq 1 ]] && INSTRUMENTS="$INSTRUMENTS expres"
+INSTRUMENTS=$(echo $INSTRUMENTS | xargs)  # trim whitespace
+
+# Build directory arguments
+DIR_ARGS=""
+[[ -n "$KPF_DIR" ]] && DIR_ARGS="$DIR_ARGS --kpf-dir $KPF_DIR"
+[[ -n "$NEID_DIR" ]] && DIR_ARGS="$DIR_ARGS --neid-dir $NEID_DIR"
+[[ -n "$HARPSN_DIR" ]] && DIR_ARGS="$DIR_ARGS --harpsn-dir $HARPSN_DIR"
+[[ -n "$EXPRES_DIR" ]] && DIR_ARGS="$DIR_ARGS --expres-dir $EXPRES_DIR"
+
+# Find the Python script (same directory as this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_SCRIPT="$SCRIPT_DIR/spectra_to_hdf5.py"
+
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "Error: Cannot find spectra_to_hdf5.py in $SCRIPT_DIR"
+    exit 1
+fi
+
+# Run with MPI
+echo "Running soleil with $NPROCS MPI processes..."
+echo "Instruments: $INSTRUMENTS"
+echo "Output: $OUTPUT"
+echo ""
+
+mpirun -np "$NPROCS" python "$PYTHON_SCRIPT" \
+    --instruments $INSTRUMENTS \
+    --output "$OUTPUT" \
+    $OVERWRITE \
+    $LIMIT \
+    $DIR_ARGS

@@ -9,14 +9,14 @@ Supported instruments:
 - EXPRES L1: FITS record array with nested spectra
 
 Output format:
+- Each instrument stored in its own HDF5 group (e.g., /kpf, /neid)
 - Standardized dataset names: "wavelength", "flux", "ivar"
 - Dimensions: (n_spectra, n_orders, n_traces, n_pixels)
 - Wavelength ordering: blue -> red along both n_pixels and n_orders axes
 - Spectra ordering: increasing observation epoch along n_spectra axis
 
-Usage:
-    mpirun -np N python spectra_to_hdf5.py --instrument kpf --output kpf.h5
-    mpirun -np N python spectra_to_hdf5.py --instrument neid --output neid.h5 --limit 100
+Usage (via soleil CLI):
+    soleil -p 32 --kpf --neid -O spectra.h5
 """
 
 import argparse
@@ -31,6 +31,14 @@ import h5py
 from mpi4py import MPI
 from astropy.io import fits
 
+
+# Default input directories (can be overridden via CLI or environment)
+DEFAULT_DIRS = {
+    "kpf": os.environ.get("SOLEIL_KPF_DIR", "/mnt/home/rrubenzahl/ceph/data/kpf/L1"),
+    "neid": os.environ.get("SOLEIL_NEID_DIR", "/mnt/home/rrubenzahl/ceph/data/neid/L2"),
+    "harpsn": os.environ.get("SOLEIL_HARPSN_DIR", "/mnt/home/rrubenzahl/ceph/data/harpsn/S1D"),
+    "expres": os.environ.get("SOLEIL_EXPRES_DIR", "/mnt/home/rrubenzahl/ceph/data/expres/L1"),
+}
 
 # Common header keywords to extract (instrument-specific ones can be added)
 COMMON_HEADER_KEYWORDS = [
@@ -53,7 +61,6 @@ class InstrumentHandler(ABC):
     """
 
     name: str = "base"
-    default_input_dir: str = ""
 
     @abstractmethod
     def discover_files(self, input_dir: str, limit: int = None) -> List[str]:
@@ -121,7 +128,6 @@ class KPFHandler(InstrumentHandler):
     """
 
     name = "kpf"
-    default_input_dir = "/mnt/home/rrubenzahl/ceph/data/kpf/L1"
     n_traces = 3
 
     def discover_files(self, input_dir: str, limit: int = None) -> List[str]:
@@ -205,7 +211,6 @@ class NEIDHandler(InstrumentHandler):
     """
 
     name = "neid"
-    default_input_dir = "/mnt/home/rrubenzahl/ceph/data/neid/L2"
     n_traces = 1
 
     def discover_files(self, input_dir: str, limit: int = None) -> List[str]:
@@ -264,7 +269,6 @@ class HARPSNHandler(InstrumentHandler):
     """
 
     name = "harpsn"
-    default_input_dir = "/mnt/home/rrubenzahl/ceph/data/harpsn/S1D"
     n_orders = 1
     n_traces = 1
 
@@ -318,7 +322,6 @@ class EXPRESHandler(InstrumentHandler):
     """
 
     name = "expres"
-    default_input_dir = "/mnt/home/rrubenzahl/ceph/data/expres/L1"
     n_traces = 1
 
     def discover_files(self, input_dir: str, limit: int = None) -> List[str]:
@@ -389,17 +392,12 @@ def parse_args():
         description="Convert spectra FITS files to HDF5 (MPI parallel)"
     )
     parser.add_argument(
-        "--instrument",
+        "--instruments",
         type=str,
+        nargs="+",
         required=True,
         choices=list(HANDLERS.keys()),
-        help="Instrument to process",
-    )
-    parser.add_argument(
-        "--input_dir",
-        type=str,
-        default=None,
-        help="Input directory (default: instrument-specific)",
+        help="Instruments to process",
     )
     parser.add_argument(
         "--output",
@@ -416,59 +414,78 @@ def parse_args():
         "--limit",
         type=int,
         default=None,
-        help="Limit number of files to process (for testing)",
+        help="Limit number of files per instrument (for testing)",
     )
+    # Per-instrument directory overrides
+    parser.add_argument("--kpf-dir", type=str, default=None, help="KPF input directory")
+    parser.add_argument("--neid-dir", type=str, default=None, help="NEID input directory")
+    parser.add_argument("--harpsn-dir", type=str, default=None, help="HARPS-N input directory")
+    parser.add_argument("--expres-dir", type=str, default=None, help="EXPRES input directory")
     return parser.parse_args()
 
 
-def create_output_file(
-    output_file: str,
+def get_input_dir(instrument: str, args) -> str:
+    """Get input directory for an instrument, checking CLI args, env vars, then defaults."""
+    cli_dirs = {
+        "kpf": args.kpf_dir,
+        "neid": args.neid_dir,
+        "harpsn": args.harpsn_dir,
+        "expres": args.expres_dir,
+    }
+    # CLI override takes precedence
+    if cli_dirs.get(instrument):
+        return cli_dirs[instrument]
+    # Fall back to default (which checks env vars)
+    return DEFAULT_DIRS[instrument]
+
+
+def create_instrument_group(
+    f: h5py.File,
+    instrument: str,
     n_files: int,
     data_shape: Tuple[int, int, int],
     header_keywords: List[str],
 ):
-    """Create the output HDF5 file with pre-allocated datasets.
-
-    Args:
-        output_file: Path to output HDF5 file
-        n_files: Number of spectra (n_spectra dimension)
-        data_shape: (n_orders, n_traces, n_pixels) from sample file
-        header_keywords: List of header keywords to store as metadata
-    """
+    """Create HDF5 group for an instrument with pre-allocated datasets."""
     n_orders, n_traces, n_pixels = data_shape
     full_shape = (n_files, n_orders, n_traces, n_pixels)
 
-    with h5py.File(output_file, "w") as f:
-        # Create standardized spectral data datasets
-        for name in ["wavelength", "flux", "ivar"]:
-            f.create_dataset(
-                name,
-                shape=full_shape,
-                dtype=np.float64,
-                compression=None,
-            )
-            print(f"  Created dataset {name}: {full_shape}")
+    grp = f.create_group(instrument)
 
-        # Create datasets for metadata (fixed-length strings for parallel HDF5)
-        f.create_dataset("filename", shape=(n_files,), dtype="S128")
-        for key in header_keywords:
-            # Sanitize key name for HDF5
-            safe_key = key.replace(" ", "_").replace("/", "_")
-            f.create_dataset(f"meta/{safe_key}", shape=(n_files,), dtype="S128")
+    # Create standardized spectral data datasets
+    for name in ["wavelength", "flux", "ivar"]:
+        grp.create_dataset(
+            name,
+            shape=full_shape,
+            dtype=np.float64,
+            compression=None,
+        )
+        print(f"  Created /{instrument}/{name}: {full_shape}")
 
-        print(f"  Created metadata datasets for {len(header_keywords)} keywords")
+    # Create datasets for metadata (fixed-length strings for parallel HDF5)
+    grp.create_dataset("filename", shape=(n_files,), dtype="S128")
+    for key in header_keywords:
+        # Sanitize key name for HDF5
+        safe_key = key.replace(" ", "_").replace("/", "_")
+        grp.create_dataset(f"meta/{safe_key}", shape=(n_files,), dtype="S128")
+
+    # Store attributes
+    grp.attrs["n_spectra"] = n_files
+    grp.attrs["n_orders"] = n_orders
+    grp.attrs["n_traces"] = n_traces
+    grp.attrs["n_pixels"] = n_pixels
+
+    print(f"  Created metadata datasets for {len(header_keywords)} keywords")
 
 
-def process_files_parallel(
+def process_instrument_parallel(
     handler: InstrumentHandler,
     fits_files: List[str],
     output_file: str,
+    group_name: str,
     comm,
 ):
-    """Process FITS files in parallel and write to HDF5.
-
-    Files should already be sorted by observation epoch before calling this function.
-    """
+    """Process FITS files for one instrument in parallel and write to HDF5 group."""
     rank = comm.Get_rank()
     size = comm.Get_size()
 
@@ -480,12 +497,12 @@ def process_files_parallel(
     my_files = [fits_files[i] for i in my_indices]
 
     if rank == 0:
-        print(f"Processing {n_files} files with {size} MPI ranks")
-        print(f"Each rank processes ~{len(my_files)} files")
+        print(f"  Processing {n_files} files with {size} MPI ranks")
         sys.stdout.flush()
 
     # Open file for parallel writing
     f = h5py.File(output_file, "r+", driver="mpio", comm=comm)
+    grp = f[group_name]
 
     # Progress tracking
     tty = None
@@ -500,7 +517,7 @@ def process_files_parallel(
         iterator = tqdm(
             zip(my_indices, my_files),
             total=len(my_files),
-            desc=f"Rank {rank}",
+            desc=f"  {group_name}",
             disable=(rank != 0 or tty is None),
             file=tty,
         )
@@ -513,18 +530,18 @@ def process_files_parallel(
             data = handler.read_data(fits_file)
 
             # Write standardized spectral data
-            f["wavelength"][idx] = data["wavelength"]
-            f["flux"][idx] = data["flux"]
-            f["ivar"][idx] = data["ivar"]
+            grp["wavelength"][idx] = data["wavelength"]
+            grp["flux"][idx] = data["flux"]
+            grp["ivar"][idx] = data["ivar"]
 
             # Write filename
-            f["filename"][idx] = os.path.basename(fits_file).encode("utf-8")
+            grp["filename"][idx] = os.path.basename(fits_file).encode("utf-8")
 
             # Write header metadata
             metadata = handler.read_header(fits_file)
             for key, val in metadata.items():
                 safe_key = key.replace(" ", "_").replace("/", "_")
-                f[f"meta/{safe_key}"][idx] = str(val).encode("utf-8")
+                grp[f"meta/{safe_key}"][idx] = str(val).encode("utf-8")
 
         except Exception as e:
             print(f"Rank {rank}: Error processing {fits_file}: {e}")
@@ -535,9 +552,6 @@ def process_files_parallel(
 
     f.close()
     comm.Barrier()
-
-    if rank == 0:
-        print(f"Completed writing {n_files} spectra")
 
 
 def main():
@@ -550,69 +564,79 @@ def main():
 
     args = parse_args()
 
-    # Get the appropriate handler
-    handler = HANDLERS[args.instrument]()
-    input_dir = args.input_dir or handler.default_input_dir
-
     if rank == 0:
-        print(f"Spectra to HDF5 Converter")
-        print(f"=========================")
-        print(f"Instrument: {handler.name}")
+        print(f"Soleil - Spectra to HDF5 Converter")
+        print(f"===================================")
         print(f"MPI ranks: {size}")
-        print(f"Input directory: {input_dir}")
+        print(f"Instruments: {', '.join(args.instruments)}")
         print(f"Output file: {args.output}")
         print(f"\nOutput format:")
+        print(f"  Groups: /{', /'.join(args.instruments)}")
         print(f"  Datasets: wavelength, flux, ivar")
         print(f"  Dimensions: (n_spectra, n_orders, n_traces, n_pixels)")
         print(f"  Ordering: blue -> red along pixels and orders")
         print(f"  Spectra sorted by observation epoch (MJD)")
         sys.stdout.flush()
 
-    # Discover files (rank 0 only, then broadcast)
-    if rank == 0:
-        print("\nDiscovering FITS files...")
-        fits_files = handler.discover_files(input_dir, args.limit)
-        n_files = len(fits_files)
+    # Prepare data for each instrument (rank 0 only, then broadcast)
+    instrument_data = {}
 
-        if n_files == 0:
-            print("No FITS files found. Exiting.")
-            comm.Abort(1)
+    for instrument in args.instruments:
+        handler = HANDLERS[instrument]()
+        input_dir = get_input_dir(instrument, args)
 
-        print(f"Found {n_files} FITS files")
+        if rank == 0:
+            print(f"\n[{instrument.upper()}]")
+            print(f"  Input directory: {input_dir}")
+            print(f"  Discovering FITS files...")
 
-        # Sort files by observation epoch (MJD)
-        print("Sorting files by observation epoch...")
-        sort_keys = []
-        for f in fits_files:
-            try:
-                sort_keys.append(handler.get_sort_key(f))
-            except:
-                sort_keys.append(0.0)
-        sorted_indices = np.argsort(sort_keys)
-        fits_files = [fits_files[i] for i in sorted_indices]
-        print(f"  MJD range: {min(sort_keys):.2f} to {max(sort_keys):.2f}")
-        sys.stdout.flush()
-    else:
-        fits_files = None
+            fits_files = handler.discover_files(input_dir, args.limit)
+            n_files = len(fits_files)
 
-    fits_files = comm.bcast(fits_files, root=0)
-    n_files = len(fits_files)
+            if n_files == 0:
+                print(f"  WARNING: No FITS files found for {instrument}. Skipping.")
+                instrument_data[instrument] = None
+                continue
 
-    # Get data shape from first file
-    if rank == 0:
-        print("\nAnalyzing FITS structure...")
-        data_shape = handler.get_data_shape(fits_files[0])
-        n_orders, n_traces, n_pixels = data_shape
-        print(f"  n_orders: {n_orders}")
-        print(f"  n_traces: {n_traces}")
-        print(f"  n_pixels: {n_pixels}")
-        sys.stdout.flush()
-    else:
-        data_shape = None
+            print(f"  Found {n_files} FITS files")
 
-    data_shape = comm.bcast(data_shape, root=0)
+            # Sort files by observation epoch (MJD)
+            print(f"  Sorting by observation epoch...")
+            sort_keys = []
+            for f in fits_files:
+                try:
+                    sort_keys.append(handler.get_sort_key(f))
+                except:
+                    sort_keys.append(0.0)
+            sorted_indices = np.argsort(sort_keys)
+            fits_files = [fits_files[i] for i in sorted_indices]
+            print(f"  MJD range: {min(sort_keys):.2f} to {max(sort_keys):.2f}")
 
-    # Check/create output file
+            # Get data shape from first file
+            print(f"  Analyzing FITS structure...")
+            data_shape = handler.get_data_shape(fits_files[0])
+            n_orders, n_traces, n_pixels = data_shape
+            print(f"    n_orders: {n_orders}, n_traces: {n_traces}, n_pixels: {n_pixels}")
+
+            instrument_data[instrument] = {
+                "files": fits_files,
+                "shape": data_shape,
+                "keywords": handler.get_header_keywords(),
+            }
+            sys.stdout.flush()
+
+    # Broadcast instrument data to all ranks
+    instrument_data = comm.bcast(instrument_data if rank == 0 else None, root=0)
+
+    # Filter out instruments with no files
+    active_instruments = [i for i in args.instruments if instrument_data.get(i) is not None]
+
+    if not active_instruments:
+        if rank == 0:
+            print("\nNo files found for any instrument. Exiting.")
+        sys.exit(1)
+
+    # Check/create output file (rank 0 only)
     if rank == 0:
         if os.path.exists(args.output):
             if args.overwrite:
@@ -624,22 +648,45 @@ def main():
                 comm.Abort(1)
 
         print(f"\nCreating output file: {args.output}")
-        create_output_file(
-            args.output,
-            n_files,
-            data_shape,
-            handler.get_header_keywords(),
-        )
+        with h5py.File(args.output, "w") as f:
+            # Store global attributes
+            f.attrs["created"] = datetime.now().isoformat()
+            f.attrs["instruments"] = active_instruments
+
+            # Create group for each instrument
+            for instrument in active_instruments:
+                data = instrument_data[instrument]
+                handler = HANDLERS[instrument]()
+                print(f"\n  Creating group: /{instrument}")
+                create_instrument_group(
+                    f,
+                    instrument,
+                    len(data["files"]),
+                    data["shape"],
+                    data["keywords"],
+                )
         sys.stdout.flush()
 
     comm.Barrier()
 
-    # Process files
-    if rank == 0:
-        print("\nProcessing files...")
-        sys.stdout.flush()
+    # Process each instrument
+    for instrument in active_instruments:
+        if rank == 0:
+            print(f"\nProcessing {instrument.upper()}...")
+            sys.stdout.flush()
 
-    process_files_parallel(handler, fits_files, args.output, comm)
+        handler = HANDLERS[instrument]()
+        data = instrument_data[instrument]
+        process_instrument_parallel(
+            handler,
+            data["files"],
+            args.output,
+            instrument,
+            comm,
+        )
+
+        if rank == 0:
+            print(f"  Completed {len(data['files'])} spectra")
 
     if rank == 0:
         dt = datetime.now() - t0
