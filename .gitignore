@@ -8,3 +8,5 @@ wheels/
 
 # Virtual environments
 .venv
+test_output.h5
+*.h5
