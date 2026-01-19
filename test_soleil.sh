@@ -14,6 +14,11 @@ echo "Soleil Test Run"
 echo "=========================================="
 echo ""
 
+# Source environment setup
+echo "Setting up environment..."
+source "$SCRIPT_DIR/setup.sh"
+echo ""
+
 # Clean up any existing test output
 rm -f "$OUTPUT_FILE"
 

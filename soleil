@@ -9,6 +9,12 @@
 
 set -e
 
+# Find the script directory and source the environment setup
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/setup.sh" ]]; then
+    source "$SCRIPT_DIR/setup.sh" > /dev/null 2>&1
+fi
+
 # Default values
 NPROCS=1
 OUTPUT=""
@@ -159,7 +165,6 @@ DIR_ARGS=""
 [[ -n "$EXPRES_DIR" ]] && DIR_ARGS="$DIR_ARGS --expres-dir $EXPRES_DIR"
 
 # Find the Python script (same directory as this script)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/spectra_to_hdf5.py"
 
 if [[ ! -f "$PYTHON_SCRIPT" ]]; then
