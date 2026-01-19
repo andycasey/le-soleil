@@ -1,0 +1,12 @@
+[project]
+name = "le-soleil"
+version = "0.1.0"
+description = "MPI-parallel script to load 1D spectra from various instruments and write to HDF5"
+readme = "README.md"
+requires-python = ">=3.11.11"
+dependencies = [
+    "astropy>=7.2.0",
+    "h5py>=3.15.1",
+    "mpi4py>=4.1.1",
+    "tqdm>=4.67.1",
+]
